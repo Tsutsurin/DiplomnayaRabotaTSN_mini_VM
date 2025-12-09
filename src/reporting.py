@@ -28,7 +28,6 @@ class VersionConstraint:
 def normalize_text(s: str) -> List[str]:
     """
     Разбиваем строку на токены: буквы+цифры, в нижнем регистре.
-    Никаких доменных стоп-слов — только базовая нормализация.
     """
     tokens = re.split(r'[^0-9A-Za-zА-Яа-я]+', s.lower())
     return [t for t in tokens if t]
@@ -110,7 +109,7 @@ def extract_version_constraints(product: str) -> List[VersionConstraint]:
         if ver:
             constraints.append(VersionConstraint('<=', ver))
 
-    # <= / >=
+    # <= / >= / < / >
     for m in re.finditer(r'(<=|>=|<|>)\s*([0-9][0-9A-Za-z\.\-\_]*)', text):
         op = m.group(1)
         ver = parse_version(m.group(2))
@@ -124,7 +123,6 @@ def extract_version_constraints(product: str) -> List[VersionConstraint]:
             constraints.append(VersionConstraint('<=', ver))
 
     # 'version 7.3.1' / 'versions 7.3.1'
-    # Добавляем только если пока ничего другого не нашли.
     if not constraints:
         m = re.search(r'versions?\s+([0-9][0-9A-Za-z\.\-\_]*)', text)
         if m:
@@ -168,7 +166,6 @@ def version_is_vulnerable(installed_version: Optional[str], product_text: str) -
 
     constraints = extract_version_constraints(product_text)
     if not constraints:
-        # нет явных ограничений — не делаем вывод, считаем неизвестным
         return 'unknown'
 
     any_match = any(version_satisfies(iv, c) for c in constraints)
@@ -212,7 +209,7 @@ def _load_data() -> Tuple[List[sqlite3.Row], Dict[str, List[sqlite3.Row]], List[
 # Сопоставление ПО ↔ уязвимостей
 # ---------------------------------------------------------------------------
 
-SIM_THRESHOLD_NAME = 0.5   # порог похожести имени продукта
+SIM_THRESHOLD_NAME = 0.3   # порог похожести имени продукта (снижен)
 SIM_THRESHOLD_VENDOR = 0.5  # порог похожести вендора (если оба указаны)
 
 
@@ -225,7 +222,7 @@ def match_vulns_for_agent(
     Возвращает словарь:
       vuln_id -> {
          'vuln': row_vuln,
-         'software': [rows_software...]
+         'software': [ { 'row': sw_row, 'version_check': 'match|mismatch|unknown' }, ... ]
       }
     Сопоставление:
       1) похожесть названия ПО и product (по токенам, % совпадения);
@@ -254,7 +251,12 @@ def match_vulns_for_agent(
             if not prod_tokens:
                 continue
 
-            sim_name = tokens_similarity(sw_name_tokens, prod_tokens)
+            # Специальное правило: VirtualBox ↔ VirtualBox Guest Additions
+            if "virtualbox" in sw_name_tokens and "virtualbox" in prod_tokens:
+                sim_name = 1.0
+            else:
+                sim_name = tokens_similarity(sw_name_tokens, prod_tokens)
+
             if sim_name < SIM_THRESHOLD_NAME:
                 continue
 
@@ -268,7 +270,7 @@ def match_vulns_for_agent(
             # 3. Версионность
             vcheck = version_is_vulnerable(sw['version'], v_product)
 
-            # если явно 'mismatch' — можно пропустить; если хочешь отображать как «неуязвим», можно включить
+            # явный mismatch считаем безопасным и не выводим
             if vcheck == 'mismatch':
                 continue
 
@@ -353,7 +355,7 @@ def generate_vulnerability_report(output_dir: Path | None = None) -> Path:
             if url:
                 base_text += f' | Подробнее: {url}'
 
-            run = p.add_run(base_text)
+            p.add_run(base_text)
 
             # перечисляем ПО на хосте, для которого мы решили, что оно может быть уязвимо
             for item in sw_list:
